@@ -1,0 +1,11 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+
+# 打包产物
+*.zip
+
+# 开发笔记（不入库）
+note/
