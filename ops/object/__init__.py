@@ -1,4 +1,5 @@
 import importlib
+from . import obj_cursor_tools
 from . import obj_fix_rotation
 from . import obj_mirror_grid
 from . import obj_origin_picker
@@ -8,6 +9,7 @@ from . import obj_visual_layout
 from . import obj_visual_layout_align
 
 _module_list = [
+    obj_cursor_tools,
     obj_fix_rotation,
     obj_mirror_grid,
     obj_origin_picker,

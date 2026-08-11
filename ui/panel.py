@@ -13,7 +13,7 @@ class RARA_PT_MainPanel(bpy.types.Panel):
         col = layout.column()#align=True
         col.operator("rara.reload_addon", text="重载模块", icon='FILE_REFRESH')
         col.separator()
-
+        
         if context.mode == 'EDIT_MESH':
             # col.label(text="三点工具", icon='EDITMODE_HLT')
             space_data = context.space_data
@@ -35,6 +35,10 @@ class RARA_PT_MainPanel(bpy.types.Panel):
             row.separator()
             row.operator("mesh.flip_normals", text="反转法向")
             row.operator("rara.model_flip_normals_by_view", text="以视口设法向")
+
+            box=col.box()
+            row = box.row()
+            row.operator("rara.cursor_to_selected", icon='PIVOT_CURSOR')
             col.separator()
 
             box=col.box()
@@ -46,8 +50,13 @@ class RARA_PT_MainPanel(bpy.types.Panel):
             row.operator("rara.model_three_points_extend_edit", text="延伸至面")
             row.operator("rara.model_three_points_flatten_edit", text="拍平至面")
             row.operator("rara.model_three_points_bisect_edit", text="切分网格")
+            # col.separator()
+            row = box.row()
+            row.operator("rara.model_extend_to_cursor", text="延伸至游标")
+            row.operator("rara.model_flatten_to_cursor", text="拍平至游标")
+            row.operator("rara.model_bisect_to_cursor", text="切分游标")
             col.separator()
-
+            
             box=col.box()
             row = box.row()
             row.operator("rara.model_slide_edge", text="滑移复制边线")
@@ -78,12 +87,9 @@ class RARA_PT_MainPanel(bpy.types.Panel):
 
             row = box.row()
             row.operator("rara.model_visual_align", text="拍平")
-            row.operator("rara.model_select_region", text="选择闭合区域")
-            row.operator("rara.model_close_loop", text="智能闭合循环线")
-            row.operator("rara.model_add_vertex_group", text="添加顶点组")
 
             row = box.row()
-            row.operator("rara.model_mehasure", text="测量")
+            row.operator("rara.model_measure", text="测量")
             row.operator("rara.model_delete_loose", text="删除松散")
             col.separator()
 
@@ -110,6 +116,11 @@ class RARA_PT_MainPanel(bpy.types.Panel):
             row.prop(space_data.overlay,"show_wireframes",text="",icon="MESH_ICOSPHERE")
             row.prop(space_data.shading,"show_xray",text="",icon="MOD_OPACITY")
             row.prop(space_data.overlay,"show_face_orientation",text="",icon="NORMALS_FACE")
+            # col.separator()
+
+            box=col.box()
+            row = box.row()
+            row.operator("rara.cursor_to_selected", icon='PIVOT_CURSOR')
             col.separator()
 
             box=col.box()

@@ -1,9 +1,8 @@
 import importlib
-from . import mesh_add_vertex_group
 from . import mesh_bridge_loop
 from . import mesh_circle_edges
-from . import mesh_close_loop
 from . import mesh_copy_paste
+from . import mesh_cursor_tools
 from . import mesh_curvature_slide
 from . import mesh_delete_loose
 from . import mesh_evenly_distribute
@@ -21,7 +20,6 @@ from . import mesh_obj_mirror
 from . import mesh_obj_toggle_hidden
 from . import mesh_resample_edges
 from . import mesh_round_vertices
-from . import mesh_select_region
 from . import mesh_slide_edge
 from . import mesh_smooth_bubble
 from . import mesh_vertical_line
@@ -30,11 +28,10 @@ from . import mesh_weld_to_edges
 from . import model_slice
 
 _module_list = [
-    mesh_add_vertex_group,
     mesh_bridge_loop,
     mesh_circle_edges,
-    mesh_close_loop,
     mesh_copy_paste,
+    mesh_cursor_tools,
     mesh_curvature_slide,
     mesh_delete_loose,
     mesh_evenly_distribute,
@@ -52,7 +49,6 @@ _module_list = [
     mesh_obj_toggle_hidden,
     mesh_resample_edges,
     mesh_round_vertices,
-    mesh_select_region,
     mesh_slide_edge,
     mesh_smooth_bubble,
     mesh_vertical_line,

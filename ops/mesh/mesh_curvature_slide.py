@@ -1,5 +1,5 @@
 # 保持曲率滑移
-# Uses shared edge_topology for robust edge detection
+# 基于链遍历的轨道检测，复用 slide_edge 的拓扑引擎
 
 import bpy
 import bmesh
@@ -9,14 +9,15 @@ import math
 import gpu
 from gpu_extras.batch import batch_for_shader
 from ...utils.gpu_utils import draw_hud_text
-from ...utils.edge_topology import div_set, get_endpoints, find_rail_verts
+from ...utils.edge_topology import div_set, get_endpoints, build_edge_chain
 
 
 def _get_circle_from_3_points(p1, p2, p3):
     a = p1 - p3
     b = p2 - p3
     cross_ab = a.cross(b)
-    if cross_ab.length_squared < 1e-6:
+    scale2 = max(a.length_squared, b.length_squared, 1e-10)
+    if cross_ab.length_squared < scale2 * 1e-12:
         return None, None, None
     a_sq = a.length_squared
     b_sq = b.length_squared
@@ -26,6 +27,134 @@ def _get_circle_from_3_points(p1, p2, p3):
     radius = (p1 - center).length
     normal = cross_ab.normalized()
     return center, radius, normal
+
+
+def _catmull_rom(p0, p1, p2, p3, t):
+    t2 = t * t
+    t3 = t2 * t
+    return 0.5 * (
+        (2.0 * p1) +
+        (-p0 + p2) * t +
+        (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2 +
+        (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3
+    )
+
+
+def _perp_rail_verts(chain_verts, idx, edge_set):
+    """Fallback: per-vertex perp scoring for non-manifold topology"""
+    v = chain_verts[idx]
+    unselected = [e for e in v.link_edges if e not in edge_set]
+    if not unselected:
+        return None, None
+    if idx > 0 and idx < len(chain_verts) - 1:
+        ref_dir = (chain_verts[idx + 1].co - chain_verts[idx - 1].co).normalized()
+    elif idx > 0:
+        ref_dir = (v.co - chain_verts[idx - 1].co).normalized()
+    else:
+        ref_dir = (chain_verts[idx + 1].co - v.co).normalized()
+    scored = sorted(
+        ((abs((e.other_vert(v).co - v.co).normalized().dot(ref_dir)), e.other_vert(v))
+         for e in unselected), key=lambda x: x[0])
+    if len(scored) >= 2:
+        return scored[0][1], scored[1][1]
+    elif len(scored) == 1:
+        return scored[0][1], None
+    return None, None
+
+
+def _face_rail_verts(bm, chain_verts, all_selected_edges):
+    """Face-shared adjacency matching: 通过共面关系确保全链 p1/p3 同侧。
+    返回 [(BMVert, BMVert), ...] 每个顶点对应的 (p1_vert, p3_vert) 或 (None, None)。"""
+    n = len(chain_verts)
+    results = [(None, None)] * n
+    edge_set = set(all_selected_edges)
+
+    # ── 第一步: 找链上相邻顶点间的选中边 ──
+    chain_edges = []
+    for i in range(n - 1):
+        e = bm.edges.get((chain_verts[i], chain_verts[i + 1]))
+        if e and e in edge_set:
+            chain_edges.append(e)
+        else:
+            chain_edges.append(None)
+
+    # ── 第二步: 为第一个顶点初始化两侧面 ──
+    v0 = chain_verts[0]
+    unselected = [e for e in v0.link_edges if e not in edge_set]
+    if len(unselected) < 2:
+        # 退化为 perp 排序
+        return [_perp_rail_verts(chain_verts, i, edge_set) for i in range(n)]
+
+    # 用第一个 chain edge 的两个面定义两侧
+    e0 = chain_edges[0]
+    if not e0 or len(e0.link_faces) < 2:
+        return [_perp_rail_verts(chain_verts, i, edge_set) for i in range(n)]
+
+    face_side_0 = e0.link_faces[0]
+    face_side_1 = e0.link_faces[1]
+
+    # 映射：面 → (上一顶点在此面上的 p 侧号)
+    side_of_face = {face_side_0: 0, face_side_1: 1}
+    side_name = ['p1', 'p3']
+
+    for i in range(n):
+        v = chain_verts[i]
+        edges_by_face = {0: None, 1: None}
+
+        for e in v.link_edges:
+            if e in edge_set:
+                continue
+            for f in e.link_faces:
+                if f in side_of_face:
+                    s = side_of_face[f]
+                    if edges_by_face[s] is None:
+                        edges_by_face[s] = e
+
+        p1_edge = edges_by_face[0]
+        p3_edge = edges_by_face[1]
+
+        if p1_edge is None and p3_edge is None:
+            results[i] = (None, None)
+            continue
+
+        p1_vert = p1_edge.other_vert(v) if p1_edge else None
+        p3_vert = p3_edge.other_vert(v) if p3_edge else None
+
+        if p1_vert is None and p3_edge is not None:
+            # 只有一侧有 rail，镜像补另一侧
+            p3_vert = p3_edge.other_vert(v)
+            p1_vert = None
+            results[i] = (p3_vert, None)
+        elif p3_vert is None and p1_edge is not None:
+            results[i] = (p1_vert, None)
+        else:
+            results[i] = (p1_vert, p3_vert)
+
+        # 更新下一顶点的面映射（通过选中边传递两侧面）
+        if i < n - 1:
+            ce = chain_edges[i]
+            if ce and len(ce.link_faces) == 2:
+                f0, f1 = ce.link_faces[0], ce.link_faces[1]
+                # 确定当前侧对应哪个面
+                if f0 in side_of_face:
+                    # f0 保持原侧, f1 对应另一侧
+                    new_map = {f0: side_of_face[f0]}
+                    new_map[f1] = 1 - side_of_face[f0]
+                elif f1 in side_of_face:
+                    new_map = {f1: side_of_face[f1]}
+                    new_map[f0] = 1 - side_of_face[f1]
+                else:
+                    new_map = {f0: 0, f1: 1}
+                side_of_face = new_map
+            else:
+                # 边界边：回退到 perp
+                remaining = list(range(i + 1, n))
+                perp_results = [_perp_rail_verts(chain_verts, j, edge_set) for j in remaining]
+                for k, j in enumerate(remaining):
+                    results[j] = perp_results[k]
+                break
+
+    return results
 
 
 def _get_next_vert(curr_v, prev_v):
@@ -44,21 +173,22 @@ def _get_next_vert(curr_v, prev_v):
     return best_v
 
 
-def _catmull_rom(p0, p1, p2, p3, t):
-    t2 = t * t
-    t3 = t2 * t
-    return 0.5 * (
-        (2.0 * p1) +
-        (-p0 + p2) * t +
-        (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2 +
-        (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3
-    )
+def _build_face_normal_map(bm, component_edges):
+    """Build dict: (v1_idx, v2_idx) → [face_normals] for component edges."""
+    result = {}
+    for e in component_edges:
+        v1, v2 = e.verts
+        key = (min(v1.index, v2.index), max(v1.index, v2.index))
+        norms = [f.normal.copy() for f in e.link_faces]
+        if norms:
+            result[key] = norms
+    return result
 
 
 class RARA_OT_MeshCurvatureSlide(bpy.types.Operator):
     bl_idname = "rara.model_mesh_curvature_slide"
     bl_label = "保持曲率滑动"
-    bl_description = "圆弧/样条/线性三模式曲率滑动（复用滑移边线拓扑引擎，支持任意拓扑结构）"
+    bl_description = "圆弧/样条/线性三模式曲率滑动（链遍历拓扑引擎，稳定识别任意尺度）"
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -76,110 +206,73 @@ class RARA_OT_MeshCurvatureSlide(bpy.types.Operator):
             self.report({'WARNING'}, "请先选中边线（非边界边）")
             return {'CANCELLED'}
 
-        # ---- NEW: use shared topology engine (same as slide edge) ----
         components = div_set(selected_edges)
         self.slide_data = []
+        all_selected = set(selected_edges)
 
         for comp in components:
-            rail_data = find_rail_verts(self.bm, comp)
-            for e in comp:
-                for v in e.verts:
-                    if v in rail_data:
-                        rd = rail_data[v]
-                        rail_edges = rd['rail_edges']
-                        rail_verts = rd['rail_verts']
+            endpoints = get_endpoints(comp)
+            if len(endpoints) == 0:
+                # Closed loop: start from an arbitrary edge
+                chain_data = build_edge_chain(comp, comp[0].verts[0])
+                # Remove the trailing (vert, None) entry for closed loops
+                chain_verts = [item[0] for item in chain_data if item[1] is not None]
+                if len(chain_verts) > 2 and chain_verts[0] == chain_verts[-1]:
+                    chain_verts.pop()
+            elif len(endpoints) == 1:
+                chain_data = build_edge_chain(comp, endpoints[0])
+                chain_verts = [item[0] for item in chain_data]
+            else:
+                # Build from both ends and merge
+                chain1 = build_edge_chain(comp, endpoints[0])
+                chain2 = build_edge_chain(comp, endpoints[1])
+                verts1 = [item[0] for item in chain1]
+                verts2 = [item[0] for item in chain2]
+                # Merge: verts1 goes forward, verts2 is reversed and appended
+                verts2_no_last = verts2[:-1] if verts2 else []
+                verts2_no_last.reverse()
+                chain_verts = verts1 + verts2_no_last
 
-                        linked_selected = [e2 for e2 in v.link_edges if e2 in comp]
-                        if not linked_selected:
-                            continue
-                        ref_edge = linked_selected[0]
+            if len(chain_verts) < 3:
+                continue
 
-                        # Build p0-p1-p2-p3-p4: p2 is current vert, p1/p3 are rail neighbors
-                        p2 = v.co.copy()
-                        if len(rail_verts) >= 2:
-                            p1, p3 = rail_verts[0].co.copy(), rail_verts[1].co.copy()
-                        elif len(rail_verts) == 1:
-                            p1 = rail_verts[0].co.copy()
-                            p3 = p2 + (p2 - p1)
-                        else:
-                            ref_vec = (ref_edge.other_vert(v).co - v.co).normalized()
-                            # Cross with view direction for a perpendicular
-                            rv3d = context.space_data.region_3d
-                            view_dir = rv3d.view_matrix.inverted().to_3x3() @ Vector((0, 0, -1))
-                            perp = ref_vec.cross(view_dir)
-                            if perp.length < 1e-6:
-                                perp = ref_vec.cross(Vector((0, 1, 0)))
-                            perp.normalize()
-                            p1 = p2 + perp
-                            p3 = p2 - perp
+            rail_map = _face_rail_verts(self.bm, chain_verts, all_selected)
+            for i, (v, (r1, r3)) in enumerate(zip(chain_verts, rail_map)):
+                if r1 is None:
+                    continue
 
-                        v1 = _get_next_vert(rail_verts[0], v) if len(rail_verts) >= 1 else None
-                        v2 = _get_next_vert(rail_verts[1], v) if len(rail_verts) >= 2 else None
-                        p0 = v1.co.copy() if v1 else p1 + (p1 - p2)
-                        p4 = v2.co.copy() if v2 else p3 + (p3 - p2)
+                p2 = v.co.copy()
+                p1 = r1.co.copy()
+                if r3 is not None:
+                    p3 = r3.co.copy()
+                else:
+                    p3 = p2 + (p2 - p1)
+                v_next1 = _get_next_vert(r1, v)
+                v_next2 = _get_next_vert(r3, v) if r3 else None
+                p0 = v_next1.co.copy() if v_next1 else p1 + (p1 - p2)
+                p4 = v_next2.co.copy() if v_next2 else p3 + (p3 - p2)
 
-                        center, radius, normal = _get_circle_from_3_points(p1, p2, p3)
-                        if center is not None:
-                            init_vec = p2 - center
-                            vec_p1 = p1 - center
-                            vec_p3 = p3 - center
-                            angle_p1 = math.atan2(init_vec.cross(vec_p1).dot(normal), init_vec.dot(vec_p1))
-                            angle_p3 = math.atan2(init_vec.cross(vec_p3).dot(normal), init_vec.dot(vec_p3))
-                            limit_min = min(angle_p1, angle_p3)
-                            limit_max = max(angle_p1, angle_p3)
-                            self.slide_data.append({
-                                'vert': v, 'init_co': p2.copy(),
-                                'center': center, 'radius': radius, 'normal': normal, 'init_vec': init_vec,
-                                'p0': p0, 'p1': p1, 'p2': p2, 'p3': p3, 'p4': p4,
-                                'limit_min': limit_min, 'limit_max': limit_max
-                            })
+                center, radius, normal = _get_circle_from_3_points(p1, p2, p3)
+                if center is not None:
+                    init_vec = p2 - center
+                    vec_p1 = p1 - center
+                    vec_p3 = p3 - center
+                    angle_p1 = math.atan2(init_vec.cross(vec_p1).dot(normal), init_vec.dot(vec_p1))
+                    angle_p3 = math.atan2(init_vec.cross(vec_p3).dot(normal), init_vec.dot(vec_p3))
+                    limit_min = min(angle_p1, angle_p3)
+                    limit_max = max(angle_p1, angle_p3)
+                    self.slide_data.append({
+                        'vert': v, 'init_co': p2.copy(),
+                        'center': center, 'radius': radius, 'normal': normal, 'init_vec': init_vec,
+                        'p0': p0, 'p1': p1, 'p2': p2, 'p3': p3, 'p4': p4,
+                        'limit_min': limit_min, 'limit_max': limit_max
+                    })
 
         if not self.slide_data:
             self.report({'WARNING'}, "无法找到合适的腰线结构——请确保每条选中边两侧都有相邻面")
             return {'CANCELLED'}
 
-        # ---- Direction consistency: ensure all vertices slide in the same direction ----
-        vert_to_idx = {d['vert']: i for i, d in enumerate(self.slide_data)}
-        comp_edge_set = set(selected_edges)
-        processed = set()
-        for data in self.slide_data:
-            v = data['vert']
-            if v in processed:
-                continue
-            processed.add(v)
-            queue = [v]
-            while queue:
-                cur_v = queue.pop(0)
-                cur_idx = vert_to_idx[cur_v]
-                cur_dir = (self.slide_data[cur_idx]['p1'] - self.slide_data[cur_idx]['p3']).normalized()
-                for e in cur_v.link_edges:
-                    if e not in comp_edge_set:
-                        continue
-                    nb = e.other_vert(cur_v)
-                    if nb not in vert_to_idx or nb in processed:
-                        continue
-                    nb_idx = vert_to_idx[nb]
-                    nb_dir = (self.slide_data[nb_idx]['p1'] - self.slide_data[nb_idx]['p3']).normalized()
-                    if cur_dir.dot(nb_dir) < 0:
-                        nd = self.slide_data[nb_idx]
-                        nd['p0'], nd['p4'] = nd['p4'], nd['p0']
-                        nd['p1'], nd['p3'] = nd['p3'], nd['p1']
-                        new_center, new_radius, new_normal = _get_circle_from_3_points(nd['p1'], nd['p2'], nd['p3'])
-                        if new_center is not None:
-                            nd['center'] = new_center
-                            nd['radius'] = new_radius
-                            nd['normal'] = new_normal
-                        nd['init_vec'] = nd['p2'] - nd['center']
-                        vec_p1 = nd['p1'] - nd['center']
-                        vec_p3 = nd['p3'] - nd['center']
-                        angle_p1 = math.atan2(nd['init_vec'].cross(vec_p1).dot(nd['normal']), nd['init_vec'].dot(vec_p1))
-                        angle_p3 = math.atan2(nd['init_vec'].cross(vec_p3).dot(nd['normal']), nd['init_vec'].dot(vec_p3))
-                        nd['limit_min'] = min(angle_p1, angle_p3)
-                        nd['limit_max'] = max(angle_p1, angle_p3)
-                    processed.add(nb)
-                    queue.append(nb)
-
-        # ---- GPU batches ----
+        # GPU batches + modal (unchanged from current)
         self.batches_circle = []
         self.batches_spline = []
         self.batches_linear = []
@@ -190,11 +283,9 @@ class RARA_OT_MeshCurvatureSlide(bpy.types.Operator):
             normal = data['normal']
             tangent = data['init_vec'].normalized()
             bitangent = normal.cross(tangent).normalized()
-            limit_min = data['limit_min']
-            limit_max = data['limit_max']
             points_circle = []
             for i in range(33):
-                angle = limit_min + (limit_max - limit_min) * (i / 32)
+                angle = data['limit_min'] + (data['limit_max'] - data['limit_min']) * (i / 32)
                 p_local = center + (tangent * math.cos(angle) + bitangent * math.sin(angle)) * radius
                 points_circle.append(self.matrix_world @ p_local)
             self.batches_circle.append(batch_for_shader(shader, 'LINE_STRIP', {"pos": points_circle}))
@@ -208,7 +299,6 @@ class RARA_OT_MeshCurvatureSlide(bpy.types.Operator):
                 p_local = _catmull_rom(data['p1'], data['p2'], data['p3'], data['p4'], t)
                 points_spline.append(self.matrix_world @ p_local)
             self.batches_spline.append(batch_for_shader(shader, 'LINE_STRIP', {"pos": points_spline}))
-            # Linear batch: straight line p1 → p2 → p3
             points_linear = [
                 self.matrix_world @ data['p1'],
                 self.matrix_world @ data['p2'],
@@ -217,11 +307,9 @@ class RARA_OT_MeshCurvatureSlide(bpy.types.Operator):
             self.batches_linear.append(batch_for_shader(shader, 'LINE_STRIP', {"pos": points_linear}))
 
         self._handle = bpy.types.SpaceView3D.draw_handler_add(
-            self._draw_callback, (context,), 'WINDOW', 'POST_VIEW'
-        )
+            self._draw_callback, (context,), 'WINDOW', 'POST_VIEW')
         self._hud_handle = bpy.types.SpaceView3D.draw_handler_add(
-            self._draw_hud_callback, (context,), 'WINDOW', 'POST_PIXEL'
-        )
+            self._draw_hud_callback, (context,), 'WINDOW', 'POST_PIXEL')
         self.mouse_start_x = event.mouse_x
         self.current_mouse_x = event.mouse_x
         context.window_manager.modal_handler_add(self)
@@ -230,8 +318,7 @@ class RARA_OT_MeshCurvatureSlide(bpy.types.Operator):
 
     def _update_header(self, context):
         mode_names = {'CIRCLE': "[C4D]圆弧", 'SPLINE': "[真曲率]样条", 'LINEAR': "[直线]线性"}
-        mode_str = mode_names[self.mode]
-        msg = "滑动鼠标 | TAB: 切模式(%s) | 左键: 确认 | 右键: 取消" % mode_str
+        msg = "滑动鼠标 | TAB: 切模式(%s) | 左键: 确认 | 右键: 取消" % mode_names[self.mode]
         context.workspace.status_text_set(msg)
         self._hud_text = msg
 
@@ -321,7 +408,6 @@ class RARA_OT_MeshCurvatureSlide(bpy.types.Operator):
             elif event.type == 'LEFTMOUSE':
                 self._remove_draw_handler(context)
                 return {'FINISHED'}
-
             elif event.type in {'RIGHTMOUSE', 'ESC'}:
                 for data in self.slide_data:
                     data['vert'].co = data['init_co']
@@ -329,9 +415,8 @@ class RARA_OT_MeshCurvatureSlide(bpy.types.Operator):
                 self._remove_draw_handler(context)
                 return {'CANCELLED'}
             return {'RUNNING_MODAL'}
-        except Exception as e:
+        except Exception:
             self._remove_draw_handler(context)
-            print("Error:", e)
             return {'CANCELLED'}
 
 

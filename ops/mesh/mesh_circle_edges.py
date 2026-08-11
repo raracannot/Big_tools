@@ -21,11 +21,12 @@ def calculate_circle_center_and_radius(chain):
     return center, radius
 
 
-def calculate_cursor_center_and_radius(chain, context):
-    verts = [v for e in chain for v in e.verts]
-    center = context.scene.cursor.location.copy()
-    radius = sum((v.co - center).length for v in verts) / len(verts)
-    return center, radius
+def calculate_cursor_center_and_radius(chain, obj):
+    cursor_world = bpy.context.scene.cursor.location
+    center_local = obj.matrix_world.inverted() @ cursor_world
+    verts = list({v for e in chain for v in e.verts})
+    radius = sum((v.co - center_local).length for v in verts) / len(verts)
+    return center_local, radius
 
 
 def calculate_circle_normal(chain):
@@ -178,7 +179,7 @@ class RARA_OT_Model_CircleEdges(bpy.types.Operator):
 
         for chain in chains:
             if self.center_method == 'CURSOR':
-                center, radius = calculate_cursor_center_and_radius(chain, context)
+                center, radius = calculate_cursor_center_and_radius(chain, obj)
             else:
                 center, radius = calculate_circle_center_and_radius(chain)
             normal = calculate_circle_normal(chain)

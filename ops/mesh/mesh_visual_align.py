@@ -168,7 +168,23 @@ class RARA_OT_Model_VisualAlign(bpy.types.Operator):
         self.snapper.build_cache(context, scope='SELECTED')
         self._update_center_and_cache()
 
-        self.axis_length = max(self.obj.dimensions) * 0.6 + 0.2
+        sel_verts_for_bbox = [v for v in self.bm.verts if v.select]
+        if sel_verts_for_bbox:
+            wm = self.obj.matrix_world
+            min_v = mathutils.Vector((float('inf'),) * 3)
+            max_v = mathutils.Vector((float('-inf'),) * 3)
+            for v in sel_verts_for_bbox:
+                wc = wm @ v.co
+                min_v.x = min(min_v.x, wc.x)
+                min_v.y = min(min_v.y, wc.y)
+                min_v.z = min(min_v.z, wc.z)
+                max_v.x = max(max_v.x, wc.x)
+                max_v.y = max(max_v.y, wc.y)
+                max_v.z = max(max_v.z, wc.z)
+            dims = max_v - min_v
+            self.axis_length = max(dims) * 0.6 + 0.2
+        else:
+            self.axis_length = 2.0
 
         args = (self, context)
         self.draw_handle_3d = bpy.types.SpaceView3D.draw_handler_add(

@@ -8,7 +8,7 @@ from gpu_extras.batch import batch_for_shader
 from bpy_extras.view3d_utils import location_3d_to_region_2d, region_2d_to_origin_3d, region_2d_to_vector_3d
 from mathutils import Vector
 from ...utils.gpu_utils import draw_hud_text
-from ...utils.edge_topology import div_set, get_endpoints, walk_rail_chain
+from ...utils.edge_topology import div_set, get_endpoints, walk_rail_chain, build_edge_chain
 
 
 def _get_t(t, p0, p1, alpha=0.5):
@@ -116,85 +116,67 @@ class RARA_OT_MeshFreeCurvatureSlide(bpy.types.Operator):
         all_selected = set(selected_edges)
         self.rails = []
         self.slide_data = {}
-        visited_rail_edges = set()
 
         for comp in components:
-            # Get all vertices in this component
-            comp_verts = set()
-            for e in comp:
-                comp_verts.update(e.verts)
+            # Build ordered vertex chain from selected edges
+            endpoints = get_endpoints(comp)
+            if len(endpoints) == 2:
+                chain1 = build_edge_chain(comp, endpoints[0])
+                chain2 = build_edge_chain(comp, endpoints[1])
+                verts1 = [item[0] for item in chain1]
+                verts2 = [item[0] for item in chain2]
+                verts2_no_last = verts2[:-1] if verts2 else []
+                verts2_no_last.reverse()
+                chain_verts = verts1 + verts2_no_last
+            elif len(endpoints) == 1:
+                chain_data = build_edge_chain(comp, endpoints[0])
+                chain_verts = [item[0] for item in chain_data]
+            else:
+                chain_data = build_edge_chain(comp, comp[0].verts[0])
+                chain_verts = [item[0] for item in chain_data if item[1] is not None]
+                if len(chain_verts) > 2 and chain_verts[0] == chain_verts[-1]:
+                    chain_verts.pop()
 
-            # For each vertex, find unselected rail edges
-            for v in comp_verts:
+            if len(chain_verts) < 2:
+                continue
+
+            for v in chain_verts:
                 if v in self.slide_data:
                     continue
-                rail_edges = [e for e in v.link_edges if e not in all_selected]
-                if not rail_edges:
-                    # ---- NEW: fallback - use selected edge direction as rail ----
-                    rail_edges = [e for e in v.link_edges if e in all_selected]
-                    if len(rail_edges) < 1:
-                        continue
-
-                chain_verts = [v]
-                for direction_edge in rail_edges[:2]:
-                    if direction_edge in all_selected:
-                        # ---- NEW: fallback walk along selected edges ----
-                        cur_v = v
-                        cur_e = direction_edge
-                        temp_chain = []
-                        steps = 0
-                        while cur_e in all_selected and steps < 50:
-                            next_v = cur_e.other_vert(cur_v)
-                            temp_chain.append(next_v)
-                            cur_v = next_v
-                            cur_e = None
-                            best_score = -999.0
-                            for ne in cur_v.link_edges:
-                                if ne in all_selected and ne not in visited_rail_edges:
-                                    nd = (ne.other_vert(cur_v).co - cur_v.co).normalized()
-                                    score = abs(nd.dot((cur_v.co - temp_chain[-2].co).normalized())) if len(temp_chain) >= 2 else 1.0
-                                    if score > best_score:
-                                        best_score, cur_e = score, ne
-                            steps += 1
+                unselected = [e for e in v.link_edges if e not in all_selected]
+                rail_chain = [v]
+                for dir_e in unselected[:2]:
+                    temp = walk_rail_chain(self.bm, v, dir_e, all_selected, max_steps=150)
+                    if dir_e == unselected[0]:
+                        rail_chain.extend(temp)
                     else:
-                        # Existing rail walk logic (improved)
-                        temp_chain = walk_rail_chain(self.bm, v, direction_edge, all_selected, max_steps=150)
+                        temp.reverse()
+                        rail_chain = temp + rail_chain
 
-                    if direction_edge == rail_edges[0]:
-                        chain_verts.extend(temp_chain)
-                    else:
-                        temp_chain.reverse()
-                        chain_verts = temp_chain + chain_verts
-
-                # Trim to selected vertices +/- 1 buffer
-                sel_indices = [i for i, cv in enumerate(chain_verts) if cv.select]
+                sel_indices = [i for i, cv in enumerate(rail_chain) if cv.select]
                 if sel_indices:
                     start_idx = max(0, sel_indices[0] - 1)
-                    end_idx = min(len(chain_verts), sel_indices[-1] + 2)
-                    chain_verts = chain_verts[start_idx:end_idx]
+                    end_idx = min(len(rail_chain), sel_indices[-1] + 2)
+                    rail_chain = rail_chain[start_idx:end_idx]
 
-                if len(chain_verts) >= 2:
-                    # Consistent rail direction
+                if len(rail_chain) >= 2:
                     if self.rails:
-                        curr_dir = (chain_verts[-1].co - chain_verts[0].co).normalized()
-                        curr_mid_co = chain_verts[len(chain_verts) // 2].co
-                        closest_rail = min(self.rails, key=lambda r: (r.coords[len(r.coords) // 2] - curr_mid_co).length_squared)
+                        curr_dir = (rail_chain[-1].co - rail_chain[0].co).normalized()
+                        curr_mid = rail_chain[len(rail_chain) // 2].co
+                        closest_rail = min(self.rails, key=lambda r: (r.coords[len(r.coords) // 2] - curr_mid).length_squared)
                         ref_dir = (closest_rail.coords[-1] - closest_rail.coords[0]).normalized()
                         if curr_dir.dot(ref_dir) < 0:
-                            chain_verts.reverse()
+                            rail_chain.reverse()
 
-                    rail_obj = _GlobalRail(chain_verts)
+                    rail_obj = _GlobalRail(rail_chain)
                     rail_id = len(self.rails)
                     self.rails.append(rail_obj)
-                    for i, cv in enumerate(chain_verts):
+                    for i, cv in enumerate(rail_chain):
                         if cv.select:
                             self.slide_data[cv] = {
-                                'vert': cv,
-                                'init_co': cv.co.copy(),
-                                'rail_id': rail_id,
-                                'u': rail_obj.lengths[i],
-                                'drag_start_u': rail_obj.lengths[i],
-                                'order_idx': i
+                                'vert': cv, 'init_co': cv.co.copy(),
+                                'rail_id': rail_id, 'u': rail_obj.lengths[i],
+                                'drag_start_u': rail_obj.lengths[i], 'order_idx': i
                             }
 
         if not self.slide_data:
