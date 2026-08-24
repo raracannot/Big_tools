@@ -1,6 +1,6 @@
 schema_version = "1.0.0"
 blender_version_min = "5.1.0"
-version = "2.3.1"
+version = "2.3.2"
 id = "big_tools"
 name = "[test][开发中]网格编辑工具集"
 tagline = "网格编辑工具集"

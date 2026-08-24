@@ -78,6 +78,8 @@ def bridge_get_input(bm, edges=None):
 def bridge_calculate_lines(bm, loops, twist, reverse):
     lines = []
     loop1, loop2 = [l[0] for l in loops]
+    loop1 = list(loop1)
+    loop2 = list(loop2)
     loop1c, loop2c = [l[1] for l in loops]
     circular = loop1c or loop2c
     circle_full = False
@@ -281,11 +283,11 @@ def bridge_sort_loops(bm, loops):
     return [loops[p[0]] for p in path]
 
 
-def go_bridge(bm, mode, twist, reverse, segments=1):
-    cached_loops = bridge_get_input(bm)
+def go_bridge(bm, mode, twist, reverse, segments=1, loops=None):
+    cached_loops = loops if loops is not None else bridge_get_input(bm)
     if not cached_loops:
         return
-    if len(cached_loops) > 2:
+    if loops is None and len(cached_loops) > 2:
         cached_loops = bridge_sort_loops(bm, cached_loops)
     max_vi = len(bm.verts) - 1
     new_verts = []
@@ -421,6 +423,19 @@ class RARA_OT_Model_BridgeLoop(bpy.types.Operator):
         if len(self.loops) > 2:
             self.loops = bridge_sort_loops(self.bm, self.loops)
 
+        self._manual_order = False
+        self._alt_held = False
+        self._drag_active = False
+        self._drag_ci = None
+        self._drag_vert = None
+        self._drag_pos = None
+        self._drag_mouse = None
+        self._mode = None
+        self._hover_vert = None
+        self._hover_target = None
+        self._preview_loops = None
+        self._build_chain_map()
+
         self.preview = BridgePreview()
         self.preview.update_data(self.bm, self.loops, self.twist, self.reverse, self.obj.matrix_world)
 
@@ -436,14 +451,152 @@ class RARA_OT_Model_BridgeLoop(bpy.types.Operator):
         if context.region != getattr(self, '_init_region', context.region):
             self._init_region = context.region
         self.preview.draw(context)
+        if self._alt_held or self._drag_active:
+            self._draw_vert_numbers(context)
+            self._draw_drag_ui(context)
         hud = getattr(self, '_hud_text', None)
         if hud:
             draw_hud_text(hud, context)
 
+    # ==========================================
+    # Vertex handles + Alt drag (sort / rotate)
+    # ==========================================
+
+    def _build_chain_map(self):
+        self._chain_of_vert = {}
+        for ci, (loop, circular) in enumerate(self.loops):
+            for pi, v in enumerate(loop):
+                self._chain_of_vert[v] = (ci, pi)
+
+    def _hit_vertex(self, context, mx, my, threshold=14.0):
+        region = context.region
+        rv3d = context.space_data.region_3d
+        best, best_d = None, threshold
+        for v, (ci, pi) in self._chain_of_vert.items():
+            co = self.obj.matrix_world @ self.bm.verts[v].co
+            c2d = view3d_utils.location_3d_to_region_2d(region, rv3d, co)
+            if c2d:
+                d = math.hypot(mx - c2d[0], my - c2d[1])
+                if d < best_d:
+                    best_d = d
+                    best = (ci, v)
+        return best
+
+    def _make_reorder_preview(self, i, j):
+        preview = list(self.loops)
+        item = preview.pop(i)
+        preview.insert(j, item)
+        return preview
+
+    def _make_rotate_preview(self, ci, pa, pb):
+        loop, circular = self.loops[ci]
+        n = len(loop)
+        shift = (pa - pb) % n
+        if not shift:
+            return list(self.loops)
+        preview = [list(l) for l in self.loops]
+        preview[ci] = [loop[shift:] + loop[:shift], circular]
+        return preview
+
+    def _draw_vert_numbers(self, context):
+        region = context.region
+        rv3d = context.space_data.region_3d
+        for v, (ci, pi) in self._chain_of_vert.items():
+            co = self.obj.matrix_world @ self.bm.verts[v].co
+            c2d = view3d_utils.location_3d_to_region_2d(region, rv3d, co)
+            if c2d:
+                draw_text_2d(str(ci + 1), (c2d[0] + 6, c2d[1] + 6), (1.0, 1.0, 1.0, 1.0), size=11)
+
+    def _draw_drag_ui(self, context):
+        region = context.region
+        rv3d = context.space_data.region_3d
+        if self._drag_active:
+            co = self.obj.matrix_world @ self.bm.verts[self._drag_vert].co
+            src = view3d_utils.location_3d_to_region_2d(region, rv3d, co)
+            if src:
+                draw_circle_2d(src, 7, (1.0, 0.55, 0.1, 1.0), filled=True)
+                if self._drag_mouse:
+                    draw_lines_2d([src, self._drag_mouse], (1.0, 0.55, 0.1, 0.9), line_width=2.0)
+            if self._hover_target:
+                tci, tv = self._hover_target
+                tco = self.obj.matrix_world @ self.bm.verts[tv].co
+                tc2d = view3d_utils.location_3d_to_region_2d(region, rv3d, tco)
+                if tc2d:
+                    color = (0.4, 1.0, 0.4, 1.0) if self._mode == 'reorder' else (1.0, 0.9, 0.2, 1.0)
+                    draw_circle_2d(tc2d, 7, color, filled=True)
+        elif self._alt_held and self._hover_vert:
+            co = self.obj.matrix_world @ self.bm.verts[self._hover_vert].co
+            c2d = view3d_utils.location_3d_to_region_2d(region, rv3d, co)
+            if c2d:
+                draw_circle_2d(c2d, 7, (1.0, 0.8, 0.2, 1.0), filled=True)
+
+    def _start_drag(self, ci, v, mx, my):
+        self._drag_ci = ci
+        self._drag_vert = v
+        self._drag_pos = self._chain_of_vert[v][1]
+        self._drag_active = True
+        self._drag_mouse = (mx, my)
+        self._mode = None
+        self._hover_target = None
+        self._preview_loops = None
+
+    def _update_drag(self, context, mx, my):
+        self._drag_mouse = (mx, my)
+        hit = self._hit_vertex(context, mx, my)
+        if hit:
+            tci, tv = hit
+            self._hover_target = hit
+            if tci == self._drag_ci:
+                self._mode = 'rotate'
+                self._preview_loops = self._make_rotate_preview(
+                    self._drag_ci, self._drag_pos, self._chain_of_vert[tv][1])
+            else:
+                self._mode = 'reorder'
+                self._preview_loops = self._make_reorder_preview(self._drag_ci, tci)
+        else:
+            self._hover_target = None
+            self._mode = None
+            self._preview_loops = None
+        loops = self._preview_loops if self._preview_loops is not None else self.loops
+        self.preview.update_data(self.bm, loops, self.twist, self.reverse, self.obj.matrix_world)
+        self.update_header(context)
+
+    def _commit_drag(self, context):
+        if self._preview_loops is not None and self._mode:
+            self.loops = self._preview_loops
+            if self._mode == 'reorder':
+                self._manual_order = True
+                self.report({'INFO'}, f"边链 {self._drag_ci + 1} 移至 {self._hover_target[0] + 1} 位置")
+            else:
+                self.report({'INFO'}, f"边环 {self._drag_ci + 1} 旋转修正")
+            self._build_chain_map()
+        self.preview.update_data(self.bm, self.loops, self.twist, self.reverse, self.obj.matrix_world)
+        self._drag_active = False
+        self._drag_mouse = None
+        self._mode = None
+        self._hover_target = None
+        self._preview_loops = None
+        self.update_header(context)
+
+    def _cancel_drag(self, context):
+        self.preview.update_data(self.bm, self.loops, self.twist, self.reverse, self.obj.matrix_world)
+        self._drag_active = False
+        self._drag_mouse = None
+        self._mode = None
+        self._hover_target = None
+        self._preview_loops = None
+        self.update_header(context)
+
     def update_header(self, context):
+        order = "手动顺序" if self._manual_order else "自动排序"
         msg = (f"【简易桥接】{len(self.loops)} 条边链 | "
                f"扭曲(Ctrl+滚轮): {self.twist} | "
+               f"{order} | "
                f"确认: 回车/左键 | 取消: ESC/右键")
+        if self._drag_active and self._mode:
+            msg += f" | 拖拽中: {'排序' if self._mode == 'reorder' else '旋转'}"
+        if len(self.loops) > 2:
+            msg += " | Alt+拖动顶点: 排序/旋转 | R: 恢复自动排序"
         self._hud_text = msg
 
     def modal(self, context, event):
@@ -454,16 +607,62 @@ class RARA_OT_Model_BridgeLoop(bpy.types.Operator):
 
             context.area.tag_redraw()
 
-            if event.type in {'ESC', 'RIGHTMOUSE'}:
+            if event.type in {'LEFT_ALT', 'RIGHT_ALT'}:
+                was = self._alt_held
+                self._alt_held = (event.value == 'PRESS')
+                if was and not self._alt_held and self._drag_active:
+                    self._cancel_drag(context)
+                return {'RUNNING_MODAL'}
+
+            if event.type in {'ESC', 'RIGHTMOUSE'} and event.value == 'PRESS':
+                if self._drag_active:
+                    self._cancel_drag(context)
+                    return {'RUNNING_MODAL'}
                 self.finish(context)
                 return {'CANCELLED'}
 
-            if event.type in {'RET', 'NUMPAD_ENTER', 'LEFTMOUSE'} and event.value == 'PRESS':
+            if event.type == 'R' and event.value == 'PRESS' and not (event.ctrl or event.alt):
+                if not self._drag_active and len(self.loops) > 2:
+                    self.loops = bridge_sort_loops(self.bm, self.loops)
+                    self._manual_order = False
+                    self._build_chain_map()
+                    self.preview.update_data(self.bm, self.loops, self.twist, self.reverse, self.obj.matrix_world)
+                    self.update_header(context)
+                    self.report({'INFO'}, "已恢复自动排序")
+                return {'RUNNING_MODAL'}
+
+            if event.type == 'LEFTMOUSE':
+                if event.value == 'PRESS':
+                    if self._drag_active:
+                        return {'RUNNING_MODAL'}
+                    if event.alt:
+                        hit = self._hit_vertex(context, event.mouse_region_x, event.mouse_region_y)
+                        if hit:
+                            self._start_drag(hit[0], hit[1], event.mouse_region_x, event.mouse_region_y)
+                        return {'RUNNING_MODAL'}
+                    self.execute_op(context)
+                    self.finish(context)
+                    return {'FINISHED'}
+                elif event.value == 'RELEASE' and self._drag_active:
+                    self._commit_drag(context)
+                    return {'RUNNING_MODAL'}
+
+            if event.type == 'MOUSEMOVE':
+                self._alt_held = bool(event.alt)
+                if self._drag_active:
+                    self._update_drag(context, event.mouse_region_x, event.mouse_region_y)
+                elif self._alt_held:
+                    self._hover_vert = self._hit_vertex(context, event.mouse_region_x, event.mouse_region_y)
+                else:
+                    self._hover_vert = None
+                return {'RUNNING_MODAL'}
+
+            if event.type in {'RET', 'NUMPAD_ENTER'} and event.value == 'PRESS':
                 self.execute_op(context)
                 self.finish(context)
                 return {'FINISHED'}
 
-            if event.ctrl and event.type in {'WHEELUPMOUSE', 'WHEELDOWNMOUSE'}:
+            if event.ctrl and event.type in {'WHEELUPMOUSE', 'WHEELDOWNMOUSE'} and not self._drag_active:
                 self.twist += 1 if event.type == 'WHEELUPMOUSE' else -1
                 self.preview.update_data(self.bm, self.loops, self.twist, self.reverse, self.obj.matrix_world)
                 self.update_header(context)
@@ -476,7 +675,7 @@ class RARA_OT_Model_BridgeLoop(bpy.types.Operator):
             return {'CANCELLED'}
 
     def execute_op(self, context):
-        go_bridge(self.bm, self.mode, self.twist, self.reverse, self.segments)
+        go_bridge(self.bm, self.mode, self.twist, self.reverse, self.segments, loops=self.loops)
         self.report({'INFO'}, f"桥接完成，扭曲:{self.twist}，分段:{self.segments}")
 
     def finish(self, context):

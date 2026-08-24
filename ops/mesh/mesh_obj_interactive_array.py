@@ -36,26 +36,47 @@ def get_interpolated_matrix(mat1, mat2, factor):
     
     
 def calculate_transform_matrix_np(orig_dict, curr_dict):
+    # Umeyama 相似变换拟合：旋转 + 均匀缩放 + 平移
+    # 对任意点数（1/2/3/多点）都返回无剪切、无非均匀缩放的干净变换
     keys = list(orig_dict.keys())
     n = len(keys)
-    if n == 0: return mathutils.Matrix.Identity(4)
-    if n < 3:
-        c_orig = sum(orig_dict.values(), mathutils.Vector()) / n
-        c_curr = sum(curr_dict.values(), mathutils.Vector()) / n
-        return mathutils.Matrix.Translation(c_curr - c_orig)
+    if n == 0:
+        return mathutils.Matrix.Identity(4)
 
-    A = np.ones((n, 4))
-    B = np.zeros((n, 3))
-    for i, k in enumerate(keys):
-        A[i, :3] = orig_dict[k]
-        B[i, :] = curr_dict[k]
-        
-    X, _, _, _ = np.linalg.lstsq(A, B, rcond=None)
-    
+    po = np.array([orig_dict[k].to_tuple() for k in keys], dtype=np.float64)
+    pc = np.array([curr_dict[k].to_tuple() for k in keys], dtype=np.float64)
+
+    co = po.mean(axis=0)
+    cc = pc.mean(axis=0)
+    po -= co
+    pc -= cc
+
+    var_orig = float(np.sum(po * po))
+    if var_orig < 1e-12:
+        # 原始点全部重合，只可能发生纯平移
+        return mathutils.Matrix.Translation(mathutils.Vector(cc) - mathutils.Vector(co))
+
+    H = po.T @ pc
+    U, S, Vt = np.linalg.svd(H)
+    R = Vt.T @ U.T
+    d = 1.0
+    if np.linalg.det(R) < 0:
+        # 消除反射，保证是纯旋转
+        Vt[-1, :] *= -1
+        R = Vt.T @ U.T
+        d = -1.0
+
+    scale = (S[0] + S[1] + S[2] * d) / var_orig
+    if not np.isfinite(scale) or scale < 1e-6:
+        scale = 1.0
+
+    trans = cc - scale * (R @ co)
     mat = mathutils.Matrix.Identity(4)
-    for row in range(3):
-        for col in range(4):
-            mat[row][col] = X[col][row]
+    for r in range(3):
+        mat[r][0] = scale * R[r][0]
+        mat[r][1] = scale * R[r][1]
+        mat[r][2] = scale * R[r][2]
+        mat[r][3] = trans[r]
     return mat
 
 
