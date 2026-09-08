@@ -2,7 +2,6 @@
 
 import bpy
 import bmesh
-import numpy as np
 from ...utils.math_utils import (
     get_continuous_edges, order_chain_edges_and_verts,
     check_y_shape_edges, resample_polyline_np, apply_resampled_chains
@@ -11,8 +10,8 @@ from ...utils.math_utils import (
 
 class RARA_OT_Model_ResampleSegmentsPreserve(bpy.types.Operator):
     bl_idname = "rara.model_resample_edges_segments_preserve"
-    bl_label = "边线重采样 [保面·段数]"
-    bl_description = "按目标段数等距重采样边线，使用原生edge_face_add填充面\n支持平滑曲线模式（Catmull-Rom样条插值）"
+    bl_label = "边线重采样 [段数]"
+    bl_description = "按目标段数等距重采样边线(旧版，仅重链不自动补面，会留下洞)\n稳定补面请用「链带重采样」新版\n支持平滑曲线模式（Catmull-Rom样条插值）"
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -44,42 +43,9 @@ class RARA_OT_Model_ResampleSegmentsPreserve(bpy.types.Operator):
             new_pts = resample_polyline_np(path_co, segments=self.segments, use_curve=self.use_curve)
             new_points_list.append(new_pts)
 
-        # 使用旧版逻辑：删旧边 → 建新边 → merge
+        # 重链（删旧边 → 建新边 → 坐标焊接），不做自动补面
         apply_resampled_chains(bm, chains, chains_verts, new_points_list, auto_merge=self.auto_merge)
         bmesh.update_edit_mesh(obj.data)
-
-        # 收集受影响的边界边 + 新链边 → 仅填充受影响区域
-        bm = bmesh.from_edit_mesh(obj.data)
-        bm.verts.ensure_lookup_table()
-        bm.edges.ensure_lookup_table()
-
-        # 找到所有与重采样链顶点相连的开放边
-        new_co = np.array(new_points_list[0] if new_points_list else [])
-        affected_edges = set()
-        if len(new_co) > 0:
-            for e in bm.edges:
-                if len(e.link_faces) >= 2:
-                    continue
-                for v in e.verts:
-                    dist = np.min(np.linalg.norm(new_co - np.array(v.co), axis=1))
-                    if dist < 0.1:
-                        affected_edges.add(e)
-                        break
-
-        # 也纳入相邻的开放边（传播一次）
-        expanded = set(affected_edges)
-        for e in affected_edges:
-            for v in e.verts:
-                for neighbor_e in v.link_edges:
-                    if neighbor_e.is_valid and len(neighbor_e.link_faces) < 2:
-                        expanded.add(neighbor_e)
-
-        for e in expanded:
-            e.select = True
-        if affected_edges:
-            bmesh.update_edit_mesh(obj.data)
-            if self.auto_merge:
-                bpy.ops.mesh.edge_face_add()
         return {'FINISHED'}
 
     def invoke(self, context, event):
@@ -88,8 +54,8 @@ class RARA_OT_Model_ResampleSegmentsPreserve(bpy.types.Operator):
 
 class RARA_OT_Model_ResampleLengthPreserve(bpy.types.Operator):
     bl_idname = "rara.model_resample_edges_length_preserve"
-    bl_label = "边线重采样 [保面·长度]"
-    bl_description = "按目标段长度等距重采样边线，使用原生edge_face_add填充面\n支持平滑曲线模式（Catmull-Rom样条插值）"
+    bl_label = "边线重采样 [长度]"
+    bl_description = "按目标段长度等距重采样边线(旧版，仅重链不自动补面，会留下洞)\n稳定补面请用「链带重采样」新版\n支持平滑曲线模式（Catmull-Rom样条插值）"
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -117,20 +83,7 @@ class RARA_OT_Model_ResampleLengthPreserve(bpy.types.Operator):
         if self.inversion:
             chains_verts = [verts[::-1] for verts in chains_verts]
 
-        # ── Phase 1: 记录存活边界边 ──
-        chain_edge_set = set()
-        for chain_edges in chains:
-            for e in chain_edges:
-                chain_edge_set.add(e)
-
-        surviving_boundary = set()
-        for e in chain_edge_set:
-            for f in e.link_faces:
-                for f_edge in f.edges:
-                    if f_edge not in chain_edge_set:
-                        surviving_boundary.add(f_edge)
-
-        # ── Phase 2: 删除 + 重采样 ──
+        # 重链（删旧边 → 建新边 → 坐标焊接），不做自动补面
         new_points_list = []
         for verts in chains_verts:
             if not verts or len(verts) < 2:
@@ -141,29 +94,6 @@ class RARA_OT_Model_ResampleLengthPreserve(bpy.types.Operator):
 
         apply_resampled_chains(bm, chains, chains_verts, new_points_list, auto_merge=self.auto_merge)
         bmesh.update_edit_mesh(obj.data)
-
-        # ── Phase 3: 识别新链边 ──
-        bm = bmesh.from_edit_mesh(obj.data)
-        new_co = np.array(new_points_list[0]) if new_points_list else np.empty((0, 3))
-        new_chain_edges = set()
-        if len(new_co) > 0:
-            for e in bm.edges:
-                if len(e.link_faces) >= 2:
-                    continue
-                for v in e.verts:
-                    if np.min(np.linalg.norm(new_co - np.array(v.co), axis=1)) < 0.01:
-                        new_chain_edges.add(e)
-                        break
-
-        # ── Phase 4: 选中 + 填充 ──
-        for e in surviving_boundary:
-            if e.is_valid:
-                e.select = True
-        for e in new_chain_edges:
-            e.select = True
-        bmesh.update_edit_mesh(obj.data)
-        if self.auto_merge:
-            bpy.ops.mesh.edge_face_add()
         return {'FINISHED'}
 
     def invoke(self, context, event):

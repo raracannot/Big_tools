@@ -1,6 +1,7 @@
 import importlib
 
 from . import addon_prefs
+from . import icons
 from . import ops
 from . import ui
 
@@ -8,6 +9,7 @@ _module_list = [addon_prefs, ops, ui]
 
 
 def register():
+    icons.load_icons()
     for module in _module_list:
         if hasattr(module, "register"):
             module.register()
@@ -17,6 +19,7 @@ def unregister():
     for module in reversed(_module_list):
         if hasattr(module, "unregister"):
             module.unregister()
+    icons.unload_icons()
 
 
 def update():

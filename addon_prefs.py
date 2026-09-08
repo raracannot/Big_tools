@@ -1,7 +1,6 @@
 import bpy
 from . import __package__ as base_package
 
-
 class BigToolsPreferences(bpy.types.AddonPreferences):
     bl_idname = base_package
 

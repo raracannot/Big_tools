@@ -2,7 +2,7 @@
 bl_info = {
     "name": "[test][开发中]网格编辑工具集",
     "author": "RARA(来一点咖啡吗)",
-    "version": (2, 3, 2),
+    "version": (2, 3, 3),
     "blender": (5, 1, 0),
     "description": "网格编辑工具集",
     "category": "Mesh",

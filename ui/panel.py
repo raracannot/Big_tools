@@ -63,15 +63,26 @@ class RARA_PT_MainPanel(bpy.types.Panel):
             row.operator("rara.model_mesh_curvature_slide", text="保持曲率滑移")
             row.operator("rara.model_mesh_free_curvature_slide", text="自由曲率滑移")
 
+
             box=col.box()
-            row = box.row()
-            row.operator("rara.model_evenly_distribute", text="均匀分布")
-            row.operator("rara.model_bridge_loop", text="简易桥接")
-            row.operator("rara.model_circle_edges", text="圆化边线")
             row = box.row()
             row.operator("rara.model_resample_edges_segments_preserve", text="重采样 [段数]")
             row.operator("rara.model_resample_edges_length_preserve", text="重采样 [长度]")
+            row = box.row()
+            row.operator("rara.model_resample_chain_segments", text="重采样 [段数]")
+            row.operator("rara.model_resample_chain_length", text="重采样 [长度]")
+            
             col.separator()
+
+            box=col.box()
+            row = box.row()
+            row.operator("rara.model_looptools_relax", text="松弛")
+            row.operator("rara.model_bridge_loop", text="桥接")
+            row.operator("rara.model_circle_edges", text="圆化")
+            row.operator("rara.model_straighten_edges", text="拉直")
+            row = box.row()
+            row.operator("rara.model_scale_arc", text="倒角半径")            
+
 
             box=col.box()
             row = box.row()
@@ -79,6 +90,7 @@ class RARA_PT_MainPanel(bpy.types.Panel):
             row.operator("rara.model_vertical_line", text="垂直线")
             row.operator("rara.model_intersect_edges", text="交点打断")
             row.operator("rara.model_extend_edges", text="延申线")
+
             row = box.row()
             row.operator("rara.model_find_circle_center", text="反求圆心")
             row.operator("rara.model_round_vertices", text="规整网格")
@@ -87,7 +99,9 @@ class RARA_PT_MainPanel(bpy.types.Panel):
 
             row = box.row()
             row.operator("rara.model_visual_align", text="拍平")
-
+            
+            # col.separator()
+            box=col.box()
             row = box.row()
             row.operator("rara.model_measure", text="测量")
             row.operator("rara.model_delete_loose", text="删除松散")
